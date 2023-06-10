@@ -40,6 +40,7 @@ preferences {
     input("twoTimer", "text", title: "Zone Two", description: "Zone Two Time", required: false, defaultValue: "1")
     input("threeTimer", "text", title: "Zone Three", description: "Zone Three Time", required: false, defaultValue: "1")
     input("fourTimer", "text", title: "Zone Four", description: "Zone Four Time", required: false, defaultValue: "1")
+    input("reportFreqMins", "text", title: "Reporting Frequency", description: "Device Reporting Frequency In Minutes", required: false, defaultValue: "60")
 }
 
 metadata {
@@ -79,6 +80,11 @@ metadata {
         command "onHold"
         command "warning"
         attribute "effect", "string"
+        attribute "zoneOne", "string"
+        attribute "zoneTwo", "string"
+        attribute "zoneThree", "string"
+        attribute "zoneFour", "string"
+        
         
     }
 
@@ -140,15 +146,21 @@ metadata {
     	standardTile("reboot", "device.reboot", decoration: "flat", height: 1, width: 1, inactiveLabel: false) {
             state "default", label:"Reboot", action:"reboot", icon:"", backgroundColor:"#ffffff"
         }
+        standardTile("configure", "device.configure", decoration: "flat", height: 1, width: 1, inactiveLabel: false) {
+            state "default", label:"Configure", action:"configure", icon:"", backgroundColor:"#ffffff"
+        }
         valueTile("ip", "ip", width: 1, height: 1) {
     		state "ip", label:'IP Address\r\n${currentValue}'
 		}
         valueTile("firmware", "firmware", width: 1, height: 1) {
     		state "firmware", label:'Firmware ${currentValue}'
 		}
+        valueTile("reportfreqmins", "reportfreqmins", width: 1, height: 1) {
+    		state "reportfreqmins", label:'Reporting Frequency ${currentValue}'
+		}
         
         main "allZonesTile"
-        details(["zoneOneTile","zoneTwoTile","zoneThreeTile","zoneFourTile","pumpTile","scheduleEffect","ip","firmware","refreshTile","reboot"])
+        details(["zoneOneTile","zoneTwoTile","zoneThreeTile","zoneFourTile","pumpTile","scheduleEffect","ip","firmware","reportfreqmins","refreshTile","reboot","configure"])
     }
 }
 
@@ -185,6 +197,7 @@ def parse(String description) {
    
    			def slurper = new JsonSlurper()
     		def jsonResult = slurper.parseText(body)
+            log.debug "jsonResult: ${jsonResult}"
 			           
             if (jsonResult.containsKey("relay")) {
             	jsonResult.relay.each {  rel ->
@@ -192,7 +205,7 @@ def parse(String description) {
                 action = rel.value
             
                 currentVal = device?.currentValue(name)
-                //log.debug "Name $name Action $action Currentval $currentVal"
+                log.debug "Name $name Action $action Currentval $currentVal"
         		if (action != currentVal){
                 	
                     if (action == "on" ) {
@@ -251,6 +264,14 @@ def parse(String description) {
        				sendEvent(name:"firmware", value: jsonResult.version, displayed: false)
                 }
     		}
+            
+            if (jsonResult.containsKey("reportfreqmins")) {
+            	//log.debug "firmware version: $jsonResult.version"
+                if (device?.currentValue("reportfreqmins") != jsonResult.reportfreqmins) {
+                	//log.debug "updating firmware version"
+       				sendEvent(name:"reportfreqmins", value: jsonResult.reportfreqmins, displayed: false)
+                }
+    		}
     
 
 			if(anyZoneOn()) {
@@ -267,14 +288,15 @@ def parse(String description) {
     	} else {
         	//log.debug "Response is not JSON: $body"
     	}
-  	}          
+  	}
+    //sendEvent(name: "checkInterval", value: 60*32, displayed: false, data: [protocol: "physicalgraph.device.Protocol.LAN", hubHardwareId: device.hub.hardwareID, offlinePingable: "1"])
 }
 
 
 def anyZoneOn() {
     if(device?.currentValue("zoneOne") in ["on","q"]) return true;
     if(device?.currentValue("zoneTwo") in ["on","q"]) return true;
-    if(device?.currentValue("zoneThree") in ["o3","q"]) return true;
+    if(device?.currentValue("zoneThree") in ["on","q"]) return true;
     if(device?.currentValue("zoneFour") in ["on","q"]) return true;
     
     false;
@@ -509,6 +531,7 @@ private encodeCredentials(username, password){
 
 private getAction(uri){ 
   updateDNI()
+    
   def userpass
   log.debug uri
   if(password != null && password != "") 
@@ -516,7 +539,7 @@ private getAction(uri){
     
   def headers = getHeader(userpass)
 
-  def hubAction = new physicalgraph.device.HubAction(
+  def hubAction = new hubitat.device.HubAction(
     method: "GET",
     path: uri,
     headers: headers
@@ -526,7 +549,6 @@ private getAction(uri){
 
 private postAction(uri, data){ 
   updateDNI()
-  
   def userpass
   
   if(password != null && password != "") 
@@ -534,7 +556,7 @@ private postAction(uri, data){
   
   def headers = getHeader(userpass)
   
-  def hubAction = new physicalgraph.device.HubAction(
+  def hubAction = new hubitat.device.HubAction(
     method: "POST",
     path: uri,
     headers: headers,
@@ -543,25 +565,8 @@ private postAction(uri, data){
   return hubAction    
 }
 
-private setDeviceNetworkId(ip, port = null){
-    def myDNI
-    if (port == null) {
-        myDNI = ip
-    } else {
-  	    def iphex = convertIPtoHex(ip)
-  	    def porthex = convertPortToHex(port)
-        
-        myDNI = "$iphex:$porthex"
-    }
-    log.debug "Device Network Id set to ${myDNI}"
-    return myDNI
-}
 
-private updateDNI() { 
-    if (state.dni != null && state.dni != "" && device.deviceNetworkId != state.dni) {
-       device.deviceNetworkId = state.dni
-    }
-}
+
 
 private getHostAddress() {
     if(getDeviceDataByName("ip") && getDeviceDataByName("port")){
@@ -582,6 +587,7 @@ private String convertPortToHex(port) {
 }
 
 def parseDescriptionAsMap(description) {
+    //log.debug "parseDescriptionAsMap() Incoming description: ${description}"
 	description.split(",").inject([:]) { map, param ->
 		def nameAndValue = param.split(":")
 		map += [(nameAndValue[0].trim()):nameAndValue[1].trim()]
@@ -604,7 +610,7 @@ def toAscii(s){
                 for (int i = 0; i < s.length(); i++){
                     sb.append((int)s.charAt(i));
                     sb.append("|");
-                    char c = s.charAt(i);
+                    def c = s.charAt(i) as char;
                 }
                 ascString = sb.toString();
                 asciiInt = Long.parseLong(ascString);
@@ -625,7 +631,7 @@ def update_needed_settings()
     
     def isUpdateNeeded = "NO"
     
-    cmds << getAction("/config?hubIp=${device.hub.getDataValue("localIP")}&hubPort=${device.hub.getDataValue("localSrvPortTCP")}")
+    cmds << getAction("/config?hubIp=${device.hub.getDataValue("localIP")}&hubPort=${device.hub.getDataValue("localSrvPortTCP")}&reportFreqMins=${reportFreqMins}")
         
     sendEvent(name:"needUpdate", value: isUpdateNeeded, displayed:false, isStateChange: true)
     return cmds
@@ -633,21 +639,43 @@ def update_needed_settings()
 
 def installed() {
 	log.debug "installed()"
+    unschedule()
 	configure()
+    //sendEvent(name: "checkInterval", value: 60*32, displayed: false, data: [protocol: "physicalgraph.device.Protocol.LAN", hubHardwareId: device.hub.hardwareID, offlinePingable: "1"])
 }
 
 def configure() {
     log.debug "configure()"
     def cmds = [] 
     cmds = update_needed_settings()
-    if (cmds != []) response(cmds)
+    log.debug cmds
+    if (cmds != []) cmds
+}
+
+private setDeviceNetworkId(ip, port = null){
+    def myDNI
+    if (port == null) {
+        myDNI = ip
+    } else {
+  	    def iphex = convertIPtoHex(ip)
+  	    def porthex = convertPortToHex(port)
+        
+        myDNI = "$iphex:$porthex"
+    }
+    log.debug "Device Network Id set to ${myDNI}"
+    return myDNI
+}
+
+private updateDNI() { 
+    if (state.dni != null && state.dni != "" && device.deviceNetworkId != state.dni) {
+       device.deviceNetworkId = state.dni
+    }
 }
 
 def updated()
 {
     log.debug "updated()"
-    def cmds = [] 
-    cmds = update_needed_settings()
-    sendEvent(name: "checkInterval", value: 2 * 15 * 60 + 2 * 60, displayed: false, data: [protocol: "lan", hubHardwareId: device.hub.hardwareID])
-    if (cmds != []) response(cmds)
+    unschedule()
+    configure()
+    //sendEvent(name: "checkInterval", value: 60*32, displayed: false, data: [protocol: "physicalgraph.device.Protocol.LAN", hubHardwareId: device.hub.hardwareID, offlinePingable: "1"])
 }

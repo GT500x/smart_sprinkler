@@ -64,7 +64,7 @@
 
 
 
-const char* version = "1.0.2";
+const char* version = "2.0.0";
 
 //user configurable global variables to set before loading to Arduino
 int maxrelays = 16;  //set up before loading to Arduino (maximum possible relays)
@@ -79,12 +79,14 @@ const char APPSETTINGS[] PROGMEM = "/appSettings.json";
 const char LOADED[] PROGMEM = " loaded: ";
 const char HUBPORT[] PROGMEM = "hubPort";
 const char HUPIP[] PROGMEM = "hubIp";
+const char REPORTFREQMINS[] PROGMEM = "reportFreqMins";
 const char DEVICENAME[] PROGMEM = "deviceName";
 
 
 // Smartthings hub information
 IPAddress hubIp = INADDR_NONE; // smartthings hub ip
 unsigned int hubPort = 0; // smartthings hub port
+unsigned int reportFreqMins = 0;
 String deviceName = "Smart Sprinkler 4 Zone Irrigation Controller";
 
 //OTA
@@ -93,6 +95,7 @@ const char* serverIndex = "<form method='POST' action='/updateOTA' enctype='mult
 
 //Irrigation
 Timer t;
+Timer t2;
 int trafficCop =0;  //tracks which station has the right of way (is on)
 int stations=relays; //sets number of stations = number of relays. This is software configurable in device type
 int relayOn = HIGH;
@@ -100,6 +103,7 @@ int relayOff = LOW;
 // initialize irrigation zone variables; for readability, zone values store [1]-[8] and [0] is not used
 long stationTime[] = {0,0,0,0,0,0,0,0,0};
 int8_t stationTimer[] = {0,0,0,0,0,0,0,0,0}; 
+int8_t reportTimer = 0;
 int queue[]={0,0,0,0,0,0,0,0,0};  // off: 0, queued: 1, running: 2
 int relay[5];
 
@@ -157,13 +161,13 @@ void handleReboot() {
 }
 
 void handleConfig() {
-  StaticJsonBuffer<100> jsonBuffer;
-  JsonObject& json = jsonBuffer.createObject();
+  StaticJsonDocument<100> jsonDoc;
+  //JsonObject& json = jsonBuffer.createObject();
   
   //If we have received an ST IP then update as needed
   if (server.hasArg("hubIp")) {
-      json[FPSTR(HUPIP)] = server.arg("hubIp");
-      IPAddress newHubIp = IPfromString(json[FPSTR(HUPIP)]);
+      jsonDoc[FPSTR(HUPIP)] = server.arg("hubIp");
+      IPAddress newHubIp = IPfromString(jsonDoc[FPSTR(HUPIP)]);
       if (newHubIp != hubIp) {
         hubIp = newHubIp;
       }
@@ -173,15 +177,32 @@ void handleConfig() {
   if (server.hasArg("hubPort")) {
       
       unsigned int newHubPort = atoi(server.arg("hubPort").c_str());
-      json[FPSTR(HUBPORT)] = newHubPort;
+      jsonDoc[FPSTR(HUBPORT)] = newHubPort;
       if (newHubPort != hubPort) { 
         hubPort = newHubPort;
       }
   }
 
+  //If we have received an update frequency, update as needed
+  if (server.hasArg("reportFreqMins")) {
+      unsigned int newreportFreqMins = atoi(server.arg("reportFreqMins").c_str());
+      jsonDoc[FPSTR(REPORTFREQMINS)] = newreportFreqMins;
+      if (newreportFreqMins != reportFreqMins) { 
+        reportFreqMins = newreportFreqMins;
+
+        if(reportFreqMins > 0) {
+          t2.stop(reportTimer);
+          reportTimer = t2.every(reportFreqMins * 60L * 1000L, timeToUpdate); 
+        } else {
+          t2.stop(reportTimer);
+        }
+      }
+  }
+
   //save config
   String settingsJSON;
-  json.printTo(settingsJSON);
+  serializeJson(jsonDoc, settingsJSON);
+  //json.printTo(settingsJSON);
   if (isDebugEnabled) {
     Serial.print("Saving JSON ");
     Serial.println("settingsJSON");
@@ -233,6 +254,7 @@ void setup(void){
     if (isDebugEnabled) {
       Serial.println(F("Application config loaded"));
     }
+    doUpdate = true; //Initial boot, config was loaded so we'll send an update to the hub after boot finished.
   }
 
     //WiFiManager
@@ -265,7 +287,9 @@ void setup(void){
   // ***irrigation setup
   
   // setup timed actions 
-  t.every(10 * 60L * 1000L, timeToUpdate); //send update to smartThings hub every 10 min
+  if(reportFreqMins > 0) {
+    reportTimer = t2.every(reportFreqMins * 60L * 1000L, timeToUpdate); //send update to smartThings hub every 60 min
+  }
   t.every(1 * 60L * 1000L, queueManager);// double check queue to see if there is work to do
   
  
@@ -381,6 +405,7 @@ void loop(void){
   }
     //run timer 
   t.update();
+  t2.update();
   
   if (doUpdate) {
     sendUpdate("");
@@ -665,7 +690,8 @@ int maxvalue () {
 void sendJSONData(WiFiClient client) {
   String updateStatus = makeUpdate();
   client.println(F("CONTENT-TYPE: application/json"));
-  //client.println(F("CONTENT-LENGTH: 29"));
+  client.print(F("CONTENT-LENGTH: ")); //Hubitat was throwing an error on updates so I added this and the following line in hopes it would fix it...
+	client.println(updateStatus.length()); 
   client.println();
   client.println(updateStatus);
 }
@@ -721,9 +747,9 @@ String makeUpdate() {
     Serial.println("Starting makeUpdate");
   }
 
-  StaticJsonBuffer<200> jsonBuffer;
-  JsonObject& json = jsonBuffer.createObject();
-  JsonObject& rel = json.createNestedObject("relay");
+  StaticJsonDocument<200> jsonDoc;
+  //JsonObject& json = jsonBuffer.createObject();
+  JsonObject rel = jsonDoc.createNestedObject("relay");
     
   // builds a status update to send to SmartThings hub
   String action="";
@@ -773,31 +799,34 @@ String makeUpdate() {
   }
 
   if (isConfigPump && configPumpStatus == "enabled") {
-    json["pump"] = "pumpAdded";
+    jsonDoc["pump"] = "pumpAdded";
   }
   if (!isConfigPump) {
-    json["pump"] = "pumpRemoved";
+    jsonDoc["pump"] = "pumpRemoved";
   }
   if (configPumpStatus == "on") {
-    json["pump"] = "onPump";
+    jsonDoc["pump"] = "onPump";
   }
   if (configPumpStatus =="off" && isConfigPump) {
-    json["pump"] = "offPump";
+    jsonDoc["pump"] = "offPump";
   }
     
-  json["version"] = version;
+  jsonDoc["version"] = version;
+
+  jsonDoc["reportfreqmins"] = reportFreqMins;
 
   if (hubPort != 0) {
-    json["hubconfig"] = "true";
+    jsonDoc["hubconfig"] = "true";
   }else {
-    json["hubconfig"] = "false";
+    jsonDoc["hubconfig"] = "false";
   }
   
   if (isDebugEnabled) {
     Serial.print("JSON ");
-    json.printTo(Serial);
+    serializeJson(jsonDoc, Serial);
   }
-  json.printTo(statusUpdate);
+  serializeJson(jsonDoc, statusUpdate);
+  //jsonDoc.printTo(statusUpdate);
   
   if (isDebugEnabled) {
     Serial.print("Created Update Message ");
@@ -831,28 +860,31 @@ bool loadAppConfig() {
   configFile.close();
 
   const int BUFFER_SIZE = JSON_OBJECT_SIZE(3);
-  StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
-  JsonObject& json = jsonBuffer.parseObject(buf.get());
+  StaticJsonDocument<BUFFER_SIZE> jsonDoc;
 
-  if (!json.success()) {
+  DeserializationError error = deserializeJson(jsonDoc, buf.get());
+
+  // Test if parsing succeeds.
+  if (error) {
     if (isDebugEnabled) {
       Serial.println(F("Failed to parse application config file"));
     }
     return false;
   }
 
-  hubPort = json[FPSTR(HUBPORT)];
-  
-  String hubAddress = json[FPSTR(HUPIP)];
-  
+  hubPort = jsonDoc[FPSTR(HUBPORT)];
+  reportFreqMins = jsonDoc[FPSTR(REPORTFREQMINS)];
+  String hubAddress = jsonDoc[FPSTR(HUPIP)];
+
   hubIp = IPfromString(hubAddress);
-  String savedDeviceName = json[FPSTR(DEVICENAME)];
+  String savedDeviceName = jsonDoc[FPSTR(DEVICENAME)];
   deviceName = savedDeviceName;
   if (isDebugEnabled) {
     Serial.print(FPSTR(HUBPORT));
     Serial.print(FPSTR(LOADED));
     Serial.println(hubPort);
     Serial.print(FPSTR(HUPIP));
+    Serial.print(FPSTR(REPORTFREQMINS));
     Serial.print(FPSTR(LOADED));
     Serial.println(hubAddress);
     Serial.print(FPSTR(DEVICENAME));
@@ -878,4 +910,3 @@ bool saveAppConfig(String jsonString) {
   configFile.close();
   return true;
 }
-
